@@ -1,0 +1,184 @@
+---
+title: "Script"
+output: html_document
+date: "2025-07-16"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+install.packages("readxl")
+library(readxl)
+
+```{r Dataset}
+
+delitos <- read_xlsx(path = "delitos_2023.xlsx")
+
+#delitos <- read_excel("delitos_2023.xlsx")
+delitos <- delitos[!(delitos$barrio == "NULL" & delitos$comuna == "NULL"), ]
+```
+```{r Limpieza de datos}
+print(paste("Los tipos de delitos son:",unique(delitos$tipo))
+)
+```
+```{r Analizamos los robos y hurtos}
+df_robos<-delitos[delitos$tipo=="Robo" | delitos$tipo=="Hurto",]
+
+# Cargar librerías necesarias
+library(dplyr)
+library(sf)
+library(leaflet)
+
+# Leer el mapa de barrios (GeoJSON oficial del GCBA)
+url <- "https://cdn.buenosaires.gob.ar/datosabiertos/datasets/barrios/barrios.geojson"
+barrios_sf <- st_read(url, quiet = TRUE)
+
+# Armonizar nombres de barrios (por si hay diferencias de mayúsculas o tildes)
+# Convertir ambos a mayúsculas para hacer el join correctamente
+df_robos <- df_robos %>%
+  mutate(barrio = toupper(barrio))
+
+barrios_sf <- barrios_sf %>%
+  mutate(BARRIO = toupper(BARRIO))
+
+# Contar cantidad total de robos por barrio
+robos_por_barrio <- df_robos %>%
+  count(barrio, name = "cantidad")
+
+# Unir los datos de robos al mapa
+barrios_mapa <- barrios_sf %>%
+  left_join(robos_por_barrio, by = c("BARRIO" = "barrio"))
+
+# Crear paleta de colores
+pal <- colorNumeric(palette = "Reds", domain = barrios_mapa$cantidad, na.color = "gray90")
+
+# Crear el mapa interactivo
+leaflet(barrios_mapa) %>%
+  addTiles() %>%
+  addPolygons(
+    fillColor = ~pal(cantidad),
+    weight = 1,
+    color = "white",
+    fillOpacity = 0.7,
+    label = ~paste0(BARRIO, ": ", ifelse(is.na(cantidad), 0, cantidad), " robos"),
+    highlightOptions = highlightOptions(
+      weight = 2,
+      color = "#444",
+      fillOpacity = 0.9,
+      bringToFront = TRUE
+    )
+  ) %>%
+  addLegend(pal = pal, values = ~cantidad, opacity = 0.7,
+            title = "Robos por barrio", position = "bottomright")
+
+```
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+install.packages(c("tidyverse", "lubridate", "sf", "spdep", "tmap", "mgcv"))
+
+library(tidyverse)
+library(lubridate)
+library(sf)
+library(spdep)
+library(tmap)
+library(mgcv)
+
+delitos <- read_xlsx(path = "delitos_2023.xlsx")
+
+delitos_rh <- delitos %>%
+  filter(str_detect(tipo, regex("hurto|robo", ignore_case = TRUE))) %>%
+  drop_na(barrio)
+
+delitos_rh <- delitos_rh %>%
+  mutate(anio_mes = floor_date(fecha, "month")) %>%
+  group_by(barrio, anio_mes) %>%
+  summarise(n = n(), .groups = "drop")
+
+# Leer shapefile de barrios
+shp_url <- "https://cdn.buenosaires.gob.ar/datosabiertos/datasets/barrios/barrios.geojson"
+barrios_sf <- st_read(shp_url)
+
+# Unir conteos al shapefile
+delitos_ultimo_mes <- delitos_rh %>%
+  filter(anio_mes == max(anio_mes))
+
+barrios_merged <- barrios_sf %>%
+  left_join(delitos_ultimo_mes, by = c("BARRIO" = "barrio"))
+
+# Visualizar
+tmap_mode("view")
+tm_shape(barrios_merged) + tm_polygons("n", palette = "Reds", title = "Delitos")
+
+# Autocorrelación espacial: Moran's I
+neighbors <- poly2nb(barrios_merged)
+weights <- nb2listw(neighbors, style = "W")
+moran.test(barrios_merged$n, weights)
+
+# Local Moran (LISA): detecta clusters locales (barrios con muchos delitos rodeados de otros con muchos delitos)
+
+barrios_merged$n[is.na(barrios_merged$n)] <- 0
+
+local_moran <- localmoran(barrios_merged$n, weights)
+barrios_merged$lisa <- local_moran[,1]
+
+tm_shape(barrios_merged) +
+  tm_polygons("lisa", palette = "-RdBu", title = "Local Moran's I")
+
+# Veamos delitos en Palermo en 2016. Faltaría ver si para otros años también ajusta bien o no
+
+delitos_palermo <- delitos_rh %>%
+  filter(barrio == "PALERMO")
+
+# Visualizamos serie temporal
+
+ggplot(delitos_palermo, aes(x = anio_mes, y = n)) +
+  geom_line() +
+  labs(title = "Delitos en Palermo", x = "Fecha", y = "Cantidad")
+
+# Ajustamos modelo de Poisson no homogéneo
+
+modelo_pois <- gam(n ~ s(as.numeric(anio_mes)), 
+                   family = poisson(link = "log"), 
+                   data = delitos_palermo)
+
+# Predicciones
+
+delitos_palermo$pred <- predict(modelo_pois, type = "response")
+
+# Visualizar ajuste
+
+ggplot(delitos_palermo, aes(x = anio_mes)) +
+  geom_line(aes(y = n), color = "black") +
+  geom_line(aes(y = pred), color = "blue") +
+  labs(title = "Ajuste Poisson no homogéneo", y = "Delitos", x = "Fecha")
+  
+  
+install.packages("spatstat")
+library(spatstat)
+
+# Crear objeto ppp (point pattern)
+pp <- ppp(x = coords$longitud, y = coords$latitud, window = owin(range(coords$longitud), range(coords$latitud)))
+
+# K de Ripley
+K <- Kest(pp)
+plot(K)
+
+# Clustering 
+
+install.packages("dbscan")
+library(dbscan)
+
+
