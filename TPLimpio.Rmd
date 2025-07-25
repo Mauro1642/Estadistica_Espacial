@@ -1,0 +1,300 @@
+---
+title: "TPLIMPIO"
+output: html_document
+date: "2025-07-21"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r Carga de DataSets}
+library(readr)
+delitos_2023 <- read_csv("delitos_2023.csv")
+delitos_2016<-read_csv("delitos_2016.csv")
+delitos_2017<-read_csv("delitos_2017.csv")
+delitos_2018<-read_csv("delitos_2018.csv")
+delitos_2019<-read_csv("delitos_2019.csv")
+delitos_2020<-read_csv("delitos_2020.csv")
+delitos_2021<-read_csv("delitos_2021.csv")
+delitos_2022<-read_csv("delitos_2022.csv")
+delitos_2024<-read_csv("delitos_2024.csv")
+```
+```{r Visualizacion de robos a lo largo de años}
+library(dplyr)
+library(sf)
+library(leaflet)
+library(purrr)
+
+# Años a considerar
+anios <- c(2016:2024)
+
+# Cargar mapa de barrios una vez
+url <- "https://cdn.buenosaires.gob.ar/datosabiertos/datasets/barrios/barrios.geojson"
+barrios_sf <- st_read(url, quiet = TRUE) %>%
+  mutate(barrio = toupper(BARRIO))
+
+# Función para generar el mapa para un año
+mapa_por_anio <- function(anio) {
+  # Obtener el dataframe del año usando get()
+  df <- get(paste0("delitos_", anio))
+  
+  # Filtrar robos y hurtos
+  df_robos <- df %>%
+    filter(tipo %in% c("Robo", "Hurto")) %>%
+    mutate(
+      barrio = toupper(barrio),
+      barrio = ifelse(barrio == "NUÃ‘EZ", "NUÑEZ", barrio)
+    )
+  
+  # Contar robos por barrio
+  robos_por_barrio <- df_robos %>%
+    count(barrio, name = "cantidad")
+  
+  # Unir con geometría
+  barrios_mapa <- barrios_sf %>%
+    left_join(robos_por_barrio, by = "barrio")
+  
+  # Paleta de colores
+  pal <- colorNumeric(palette = "Reds", domain = barrios_mapa$cantidad, na.color = "gray90")
+  
+  # Crear mapa interactivo
+  leaflet(barrios_mapa) %>%
+    addTiles() %>%
+    addPolygons(
+      fillColor = ~pal(cantidad),
+      weight = 1,
+      color = "white",
+      fillOpacity = 0.7,
+      label = ~paste0(barrio, ": ", cantidad, " robos"),
+      highlightOptions = highlightOptions(
+        weight = 2,
+        color = "#444",
+        fillOpacity = 0.9,
+        bringToFront = TRUE
+      )
+    ) %>%
+    addLegend(pal = pal, values = ~cantidad, opacity = 0.7,
+              title = paste("Robos por barrio -", anio),
+              position = "bottomright")
+}
+
+# Generar los mapas
+mapas <- map(anios, mapa_por_anio)
+names(mapas) <- as.character(anios)
+```
+```{r Visualizo los mapas}
+mapas["2016"]
+mapas["2017"]
+mapas["2018"]
+mapas["2019"]
+mapas["2020"]
+mapas["2021"]
+mapas["2022"]
+mapas["2023"]
+mapas["2024"]
+```
+```{r Indice de Moran Para medir la autocorrelacion espacial}
+library(spdep)
+df_robos<-delitos_2024[delitos_2024$tipo=="Robo" | delitos_2024$tipo=="Hurto",]
+barrios_sf <- st_read(url, quiet = TRUE)
+
+# Normalizar nombres de barrios
+df_robos <- df_robos %>%
+  mutate(barrio = toupper(barrio))
+
+barrios_sf <- barrios_sf %>%
+  mutate(barrio = toupper(BARRIO))  # BARRIO es el nombre en el GeoJSON
+
+# Arreglar errores de codificación
+df_robos$barrio[df_robos$barrio == "NUÃ‘EZ"] <- "NUÑEZ"
+
+# Contar robos por barrio
+robos_por_barrio <- df_robos %>%
+  count(barrio, name = "cantidad")
+
+# Unir con geometría
+barrios_mapa <- barrios_sf %>%
+  left_join(robos_por_barrio, by = "barrio")
+
+# 1. Vecinos contiguos
+vecinos <- poly2nb(barrios_mapa)
+
+# 2. Lista de pesos
+pesos <- nb2listw(vecinos, style = "W", zero.policy = TRUE)
+
+# 3. Completar NAs con 0
+barrios_mapa$cantidad[is.na(barrios_mapa$cantidad)] <- 0
+
+# 4. Índice de Moran global
+moran_global <- moran.test(barrios_mapa$cantidad, pesos, zero.policy = TRUE)
+print(moran_global)
+```
+```{r Estudiamos las zonas con mayor gravedad en los robos}
+robos_con_arma <- df_robos %>%
+  filter(uso_arma == "SI") %>%
+  group_by(barrio) %>%
+  summarise(cantidad_arma = n())
+# Corregir mal encoding si es necesario
+robos_con_arma$barrio[robos_con_arma$barrio == "NUÃ‘EZ"] <- "NUÑEZ"
+
+# Unir al mapa
+barrios_mapa <- barrios_sf %>%
+  left_join(robos_con_arma, by = "barrio")
+
+# Crear paleta de colores para robos con arma
+pal <- colorNumeric(palette = "Reds", domain = barrios_mapa$cantidad_arma, na.color = "gray90")
+
+# Crear mapa
+leaflet(barrios_mapa) %>%
+  addTiles() %>%
+  addPolygons(
+    fillColor = ~pal(cantidad_arma),
+    weight = 1,
+    color = "white",
+    fillOpacity = 0.7,
+    label = ~ paste0(barrio, ": ", cantidad_arma, " robos con arma"),
+    highlightOptions = highlightOptions(
+      weight = 2,
+      color = "#444",
+      fillOpacity = 0.9,
+      bringToFront = TRUE
+    )
+  ) %>%
+  addLegend(pal = pal, values = ~cantidad_arma, opacity = 0.7,
+            title = "Robos con arma por barrio", position = "bottomright")
+
+```
+```{r Modelado de Poisson}
+library(dplyr)
+library(purrr)
+library(stringr)
+
+
+# Lista de años (sin 2020)
+anios <- c(2016, 2017, 2018, 2019, 2020,2021, 2022, 2023,2024)
+
+# Función que limpia un dataset de delitos de un año
+limpiar_dataset <- function(anio) {
+  nombre <- paste0("delitos_", anio)
+  datos <- get(nombre)
+  
+  datos_limpios <- datos %>%
+    mutate(
+      comuna = as.character(comuna),
+      franja = as.character(franja),
+      latitud = str_trim(latitud),
+      longitud = str_trim(longitud),
+      latitud = na_if(latitud, ""),
+      longitud = na_if(longitud, ""),
+      latitud = na_if(latitud, "NULL"),
+      longitud = na_if(longitud, "NULL"),
+      latitud = as.numeric(latitud),
+      longitud = as.numeric(longitud)
+    ) %>%
+    filter(!is.na(latitud), !is.na(longitud)) %>%
+    mutate(anio = anio)
+  
+  return(datos_limpios)
+}
+
+# Aplicar a todos los años
+lista_delitos <- map(anios, limpiar_dataset)
+
+# Unir todos los años en un solo dataset
+delitos_total <- bind_rows(lista_delitos)
+
+delitos_total <- bind_rows(lista_delitos)
+delitos_total<- delitos_total %>%
+  filter(!is.na(latitud), !is.na(longitud)) %>%
+  filter(is.numeric(latitud), is.numeric(longitud))
+```
+```{r Modelado de Poisson}
+#Como el test de moran nos indica que hay autocorrelacion espacial esperamos que el modelo no sea bueno.
+library(sf)
+library(sp)
+library(spatstat)
+# ---------------------
+# 📦 Cargar paquetes
+# ---------------------
+library(lubridate)
+
+# ---------------------
+# 📌 Preprocesamiento
+# ---------------------
+# Filtrar observaciones válidas
+delitos_filtrados <- delitos_total %>%
+  filter(!is.na(latitud), !is.na(longitud), !is.na(fecha)) %>%
+  mutate(fecha = as.Date(fecha),
+         fecha_num = as.numeric(fecha - as.Date("2016-01-01")))  # días desde 2016
+
+# Convertir a objeto sf con proyección adecuada
+delitos_sf <- st_as_sf(delitos_filtrados, coords = c("longitud", "latitud"), crs = 4326) %>%
+  st_transform(22185)
+
+# ---------------------
+# 🌍 Ventana de observación
+# ---------------------
+barrios <- st_read("https://cdn.buenosaires.gob.ar/datosabiertos/datasets/barrios/barrios.geojson", quiet = TRUE) %>%
+  st_transform(22185)
+
+caba_union <- st_union(barrios)
+win <- as.owin(caba_union)
+
+# ---------------------
+# 📍 Coordenadas
+# ---------------------
+coords <- st_coordinates(delitos_sf)
+
+# ---------------------
+# 📌 Modelo 1: solo espacial (x, y)
+# ---------------------
+delitos_ppp <- ppp(x = coords[,1], y = coords[,2], window = win)
+
+modelo_espacial <- ppm(delitos_ppp, ~x + y)
+summary(modelo_espacial)
+
+# Convertir objeto 'im' a data.frame con coordenadas x, y y valor
+intensidad_df <- as.data.frame(intensidad)
+colnames(intensidad_df) <- c("x", "y", "intensity")
+ggplot() +
+  geom_sf(data = barrios, fill = NA, color = "black") +     # mapa de barrios
+  geom_raster(data = intensidad_df, aes(x = x, y = y, fill = intensity), alpha = 0.6) +  # intensidad
+  scale_fill_viridis_c(option = "inferno") +                # paleta para intensidad
+  coord_sf() +
+  labs(title = "Intensidad estimada de delitos en CABA",
+       fill = "Intensidad") +
+  theme_minimal()
+```
+```{r}
+
+# ---------------------
+# 🕒 Modelo 2: espacio-temporal (x, y, t)
+# ---------------------
+# Crear objeto ppx: espacio + tiempo
+delitos_ppx <- ppx(
+  data = data.frame(x = coords[,1], y = coords[,2], t = delitos_filtrados$fecha_num),
+  domain = list(
+    x = win$xrange,
+    y = win$yrange,
+    t = range(delitos_filtrados$fecha_num)
+  )
+)
+#formula_modelo <- ~x + y + t
+#modelo_espacio_temporal <- slrm(delitos_ppx, formula = formula_modelo)
+```
+```{r Modelo de Cox}
+coords <- st_coordinates(delitos_sf)
+win <- as.owin(caba_union)  # tu ventana espacial
+
+delitos_ppp <- ppp(x = coords[,1], y = coords[,2], window = win)
+risk <- as.im(1, W = win)  # intensidad constante
+formula_lgcp <- ~1
+
+fit <- lgcp(
+  formula = ~1,
+  x = delitos_ppp,
+  spatial.intensity = risk,
+  model = lgcpModel(dim = 2)
+)
+```
+
