@@ -213,6 +213,7 @@ delitos_total<- delitos_total %>%
 library(sf)
 library(sp)
 library(spatstat)
+library(ggplot2)
 # ---------------------
 # 📦 Cargar paquetes
 # ---------------------
@@ -252,8 +253,22 @@ delitos_ppp <- ppp(x = coords[,1], y = coords[,2], window = win)
 
 modelo_espacial <- ppm(delitos_ppp, ~x + y)
 summary(modelo_espacial)
+set.seed(123)
+sub_ppp <- delitos_ppp[sample(1:delitos_ppp$n, 1000)]  # submuestrea 3000 puntos
+modelo_sub <- ppm(sub_ppp, ~x+y)
+envelope_poisson<-envelope(modelo_sub, fun = Kest, nsim = 50,nrank=5)
+plot(
+  envelope_poisson,
+  main = "Envelope de K(r) - Modelo Poisson Inhomogéneo",
+  xlab = "Distancia r (metros)",
+  ylab = expression(K(r)),
+  legend = FALSE
+)
+legend("topleft", legend = c("K observada", "Envelopes (simulado)", "K teórica CSR"),
+       col = c("black", "grey", "red"), lty = c(1, 1, 2), bty = "n")
 
 # Convertir objeto 'im' a data.frame con coordenadas x, y y valor
+intensidad <- predict(modelo_espacial, type = "intensity")
 intensidad_df <- as.data.frame(intensidad)
 colnames(intensidad_df) <- c("x", "y", "intensity")
 ggplot() +
@@ -264,6 +279,8 @@ ggplot() +
   labs(title = "Intensidad estimada de delitos en CABA",
        fill = "Intensidad") +
   theme_minimal()
+```
+```{r funcion K para el modelo de poisson}
 ```
 ```{r}
 
@@ -282,19 +299,32 @@ delitos_ppx <- ppx(
 #formula_modelo <- ~x + y + t
 #modelo_espacio_temporal <- slrm(delitos_ppx, formula = formula_modelo)
 ```
-```{r Modelo de Cox}
-coords <- st_coordinates(delitos_sf)
-win <- as.owin(caba_union)  # tu ventana espacial
+```{r Thomas process}
+# STEP 1: Fit a Thomas cluster model
+set.seed(42)
+sub_ppp <- delitos_ppp[sample(1:delitos_ppp$n, 100)]
+modelo_thomas <- kppm(sub_ppp ~ 1, clusters = "Thomas",control = list(eps = 100))
 
-delitos_ppp <- ppp(x = coords[,1], y = coords[,2], window = win)
-risk <- as.im(1, W = win)  # intensidad constante
-formula_lgcp <- ~1
+# STEP 2: Predict intensity on a grid
+intensidad_thomas <- predict(modelo_thomas, type = "intensity")
+envelope_thomas <- envelope(modelo_thomas, fun = Kest, nsim = 10,nrank=4)
 
-fit <- lgcp(
-  formula = ~1,
-  x = delitos_ppp,
-  spatial.intensity = risk,
-  model = lgcpModel(dim = 2)
-)
+plot(envelope_thomas, main = "Función K: datos vs modelo Thomas")
+# STEP 3: Convert to data.frame for ggplot
+intensidad_df <- as.data.frame(intensidad_thomas)
+colnames(intensidad_df) <- c("x", "y", "intensity")
+
+# STEP 4: Plot with ggplot2 over the barrios map
+library(ggplot2)
+library(sf)
+
+ggplot() +
+  geom_sf(data = barrios, fill = NA, color = "black", linewidth = 0.3) +  # CABA map
+  geom_raster(data = intensidad_df, aes(x = x, y = y, fill = intensity), alpha = 0.7) +
+  scale_fill_viridis_c(option = "inferno") +
+  coord_sf() +
+  labs(title = "Thomas Model - Estimated Intensity of Robos",
+       fill = "Intensidad") +
+  theme_minimal()
 ```
 
