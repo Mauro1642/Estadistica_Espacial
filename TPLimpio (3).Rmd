@@ -1,0 +1,471 @@
+---
+title: "TPLIMPIO"
+output: html_document
+date: "2025-07-21"
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r Librerias necesarias,echo=TRUE,results='hide'}
+
+library(readr)
+library(dplyr)
+library(sf)
+library(leaflet)
+library(purrr)
+library(spdep)
+library(stringr)
+library(sp)
+library(spatstat)
+library(ggplot2)
+library(lubridate)
+```
+
+```{r Carga de DataSets}
+
+delitos_2016<-read_csv("delitos_2016.csv")
+delitos_2017<-read_csv("delitos_2017.csv")
+delitos_2018<-read_csv("delitos_2018.csv")
+delitos_2019<-read_csv("delitos_2019.csv")
+delitos_2020<-read_csv("delitos_2020.csv")
+delitos_2021<-read_csv("delitos_2021.csv")
+delitos_2022<-read_csv("delitos_2022.csv")
+delitos_2023 <- read_csv("delitos_2023.csv")
+delitos_2024<-read_csv("delitos_2024.csv")
+```
+
+```{r Visualizacion de robos a lo largo de años}
+
+# Años a considerar
+anios <- c(2016:2024)
+
+# Cargar mapa de barrios una vez
+url <- "https://cdn.buenosaires.gob.ar/datosabiertos/datasets/barrios/barrios.geojson"
+barrios_sf <- st_read(url, quiet = TRUE) %>%
+  mutate(barrio = toupper(BARRIO))
+
+# Función para generar el mapa para un año
+mapa_por_anio <- function(anio) {
+  # Obtener el dataframe del año usando get()
+  df <- get(paste0("delitos_", anio))
+  
+  # Filtrar robos y hurtos
+  df_robos <- df %>%
+    filter(tipo %in% c("Robo", "Hurto")) %>%
+    mutate(
+      barrio = toupper(barrio),
+      barrio = ifelse(barrio == "NUÃ‘EZ", "NUÑEZ", barrio)
+    )
+  
+  # Contar robos por barrio
+  robos_por_barrio <- df_robos %>%
+    count(barrio, name = "cantidad")
+  
+  # Unir con geometría
+  barrios_mapa <- barrios_sf %>%
+    left_join(robos_por_barrio, by = "barrio")
+  
+  # Paleta de colores
+  pal <- colorNumeric(palette = "Reds", domain = barrios_mapa$cantidad, na.color = "gray90")
+  
+  # Crear mapa interactivo
+  leaflet(barrios_mapa) %>%
+    addTiles() %>%
+    addPolygons(
+      fillColor = ~pal(cantidad),
+      weight = 1,
+      color = "white",
+      fillOpacity = 0.7,
+      label = ~paste0(barrio, ": ", cantidad, " robos"),
+      highlightOptions = highlightOptions(
+        weight = 2,
+        color = "#444",
+        fillOpacity = 0.9,
+        bringToFront = TRUE
+      )
+    ) %>%
+    addLegend(pal = pal, values = ~cantidad, opacity = 0.7,
+              title = paste("Robos por barrio -", anio),
+              position = "bottomright")
+}
+
+# Generar los mapas
+mapas <- map(anios, mapa_por_anio)
+names(mapas) <- as.character(anios)
+```
+
+```{r Visualizo los mapas}
+
+mapas["2016"]
+mapas["2017"]
+mapas["2018"]
+mapas["2019"]
+mapas["2020"]
+mapas["2021"]
+mapas["2022"]
+mapas["2023"]
+mapas["2024"]
+```
+
+```{r Evolución temporal}
+
+lista_delitos <- list(delitos_2016, delitos_2017, delitos_2018, delitos_2019,
+                      delitos_2020, delitos_2021, delitos_2022, delitos_2023, delitos_2024)
+
+anios <- 2016:2024
+
+serie <- purrr::map2_df(lista_delitos, anios, ~{
+  data.frame(
+    anio = .y,
+    total_robos = nrow(filter(.x, tipo %in% c("Robo", "Hurto")))
+  )
+})
+
+ggplot(serie, aes(x = anio, y = total_robos)) +
+  geom_line(color = "steelblue", size = 1) +
+  geom_point(size = 2, color = "red") +
+  labs(title = "Robos y hurtos totales en CABA (2016-2024)",
+       x = "Año", y = "Cantidad de robos y hurtos") +
+  theme_minimal()
+```
+
+Test de Moran
+
+Para medir la autocorrelación espacial de eventos en distintos barrios de CABA utilizamos el índice de Moran definido como: $$I=\frac{n}{\sum_{i,j}w_{ij}}\frac{\sum_{ij}w_{ij}(x_i-\bar{x})(x_j-\bar{x})}{\sum_i(x_i-\bar{x}^2)}$$ $I>0$, indica una clusterización de los datos, $I<0$ indica una repulsión de los datos, $I=0$ indica aleatoriedad. El método $moran.test$ de $R$ es un test con hipótesis nula $H_0$: $I_{obs}<= E(I)$ vs $H_1$: $I_{obs}>E(I)$.
+
+```{r Indice de Moran Para medir la autocorrelacion espacial}
+
+df_robos<-delitos_2024[delitos_2024$tipo=="Robo" | delitos_2024$tipo=="Hurto",]
+barrios_sf <- st_read(url, quiet = TRUE)
+
+# Normalizar nombres de barrios
+df_robos <- df_robos %>%
+  mutate(barrio = toupper(barrio))
+
+barrios_sf <- barrios_sf %>%
+  mutate(barrio = toupper(BARRIO))  # BARRIO es el nombre en el GeoJSON
+
+# Arreglar errores de codificación
+df_robos$barrio[df_robos$barrio == "NUÃ‘EZ"] <- "NUÑEZ"
+
+# Contar robos por barrio
+robos_por_barrio <- df_robos %>%
+  count(barrio, name = "cantidad")
+
+# Unir con geometría
+barrios_mapa <- barrios_sf %>%
+  left_join(robos_por_barrio, by = "barrio")
+
+# 1. Vecinos contiguos
+vecinos <- poly2nb(barrios_mapa)
+
+# 2. Lista de pesos
+pesos <- nb2listw(vecinos, style = "W", zero.policy = TRUE)
+
+# 3. Completar NAs con 0
+barrios_mapa$cantidad[is.na(barrios_mapa$cantidad)] <- 0
+
+# 4. Índice de Moran global
+moran_global <- moran.test(barrios_mapa$cantidad, pesos, zero.policy = TRUE)
+print(moran_global)
+```
+
+Dado que $I_{obs}>p_{value}$ rechazamos la hipótesis nula. Luego, el test nos indica que hay autocorrelación espacial positiva.
+
+```{r Estudiamos las zonas con mayor gravedad en los robos}
+
+robos_con_arma <- df_robos %>%
+  filter(uso_arma == "SI") %>%
+  group_by(barrio) %>%
+  summarise(cantidad_arma = n())
+# Corregir mal encoding si es necesario
+robos_con_arma$barrio[robos_con_arma$barrio == "NUÃ‘EZ"] <- "NUÑEZ"
+
+# Unir al mapa
+barrios_mapa <- barrios_sf %>%
+  left_join(robos_con_arma, by = "barrio")
+
+# Crear paleta de colores para robos con arma
+pal <- colorNumeric(palette = "Reds", domain = barrios_mapa$cantidad_arma, na.color = "gray90")
+
+# Crear mapa
+leaflet(barrios_mapa) %>%
+  addTiles() %>%
+  addPolygons(
+    fillColor = ~pal(cantidad_arma),
+    weight = 1,
+    color = "white",
+    fillOpacity = 0.7,
+    label = ~ paste0(barrio, ": ", cantidad_arma, " robos con arma"),
+    highlightOptions = highlightOptions(
+      weight = 2,
+      color = "#444",
+      fillOpacity = 0.9,
+      bringToFront = TRUE
+    )
+  ) %>%
+  addLegend(pal = pal, values = ~cantidad_arma, opacity = 0.7,
+            title = "Robos con arma por barrio", position = "bottomright")
+
+```
+
+```{r Modelado de Poisson}
+
+# Lista de años (sin 2020, pues es un año particular)
+anios <- c(2016, 2017, 2018, 2019, 2020,2021, 2022, 2023,2024)
+
+# Función que limpia un dataset de delitos de un año
+limpiar_dataset <- function(anio) {
+  nombre <- paste0("delitos_", anio)
+  datos <- get(nombre)
+  
+  datos_limpios <- datos %>%
+    mutate(
+      comuna = as.character(comuna),
+      franja = as.character(franja),
+      latitud = str_trim(latitud),
+      longitud = str_trim(longitud),
+      latitud = na_if(latitud, ""),
+      longitud = na_if(longitud, ""),
+      latitud = na_if(latitud, "NULL"),
+      longitud = na_if(longitud, "NULL"),
+      latitud = as.numeric(latitud),
+      longitud = as.numeric(longitud)
+    ) %>%
+    filter(!is.na(latitud), !is.na(longitud)) %>%
+    mutate(anio = anio)
+  
+  return(datos_limpios)
+}
+
+# Aplicar a todos los años
+lista_delitos <- map(anios, limpiar_dataset)
+
+# Unir todos los años en un solo dataset
+delitos_total <- bind_rows(lista_delitos)
+
+delitos_total <- bind_rows(lista_delitos)
+delitos_total<- delitos_total %>%
+  filter(!is.na(latitud), !is.na(longitud)) %>%
+  filter(is.numeric(latitud), is.numeric(longitud))
+```
+
+```{r Preparacion de datos}
+
+delitos_filtrados <- delitos_total %>%
+  filter(!is.na(latitud), !is.na(longitud), !is.na(fecha)) %>%
+  mutate(fecha = as.Date(fecha),
+         fecha_num = as.numeric(fecha - as.Date("2016-01-01")))  # días desde 2016
+
+# Convertir a objeto sf con proyección adecuada
+delitos_sf <- st_as_sf(delitos_filtrados, coords = c("longitud", "latitud"), crs = 4326) %>%
+  st_transform(22185)
+
+barrios <- st_read("https://cdn.buenosaires.gob.ar/datosabiertos/datasets/barrios/barrios.geojson", quiet = TRUE) %>%
+  st_transform(22185)
+
+caba_union <- st_union(barrios)
+win <- as.owin(caba_union)
+coords <- st_coordinates(delitos_sf)
+
+delitos_ppp <- ppp(x = coords[,1], y = coords[,2], window = win)
+
+```
+
+## Modelo de Thomas y Poisson Inhomogeneo
+
+El Modelo de Poisson Inhomogéneo es un modelo de procesos puntuales que considera las siguientes hipótesis: el número de eventos en un área $A$, $N(A)$ sigue una distribución de Poisson con parámetro $\int_A\lambda(u)du$ y la función de intensidad $\lambda$ depende del espacio ($\lambda \neq c$). Si $A$ y $B$ son dos regiones disjuntas entonces $N(A)$ y $N(B)$ son independientes.
+
+Por otro lado, el proceso de Thomas es un proceso de clusterización en el cual hay interacción entre las zonas del espacio. En particular, el modelo asume que hay una interacción positiva entre zonas del espacio cercanas: un aumento en la cantidad de eventos en una zona aumenta la probabilidad de eventos en una zona cercana.
+
+```{r Modelos}
+
+set.seed(123)
+sub_ppp <- delitos_ppp[sample(1:delitos_ppp$n, 100)]
+modelo_thomas <- kppm(sub_ppp ~ 1, clusters = "Thomas",control = list(eps = 100))
+modelo_espacial <- ppm(sub_ppp, ~x + y)
+```
+
+Una métrica muy utilizada para evaluar qué tan bien se ajusta el modelo al patrón de los datos es la función K de Ripley cuya expresión matemática es: $$K(r)=\frac{1}{\lambda (n-1)}\sum_{i\neq j}I(d_{ij}<r)$$ Dicha función mide, dado un r y salvo una constante, la proporción de eventos que están a una distancia menor a $r$. La funcion $envelope()$ en $R$ recibe dos parámetros correspondientes al modelo y al estadístico que queremos evaluar, en este caso la función $K$; el método genera dos funciones $K$: una correspondiente a los datos y otra con datos simulados del modelo que se le pasa como argumento.
+
+También generamos un modelo CSR (Complete Spatial Randomness), que
+
+```{r Envolventes}
+
+# Graficamos Envolventes
+envelope_thomas <- envelope(modelo_thomas, fun = Kest, nsim = 50,nrank=5)
+envelope_poisson<-envelope(modelo_espacial, fun = Kest, nsim = 50,nrank=5)
+envelope_CSR<-envelope(sub_ppp,Kest,nsim=50,nrank=5)
+
+par(mfrow = c(1, 3))
+plot(envelope_thomas, 
+     main = "Envelope Thomas",
+     xlab="r",
+     ylab= expression(K(r)),
+     legend= TRUE
+)
+plot(
+  envelope_CSR,
+  main = "Envelope CSR",
+  xlab = "r",
+  ylab = expression(K(r)),
+  legend = TRUE
+)
+plot(
+  envelope_poisson,
+  main = "Envelope Poisson Inhomogeneo",
+  xlab = "r",
+  ylab = expression(K(r)),
+  legend = TRUE
+)
+par(mfrow = c(1, 1))
+#legend("topleft", legend = c("K observada", "Envelopes (simulado)", "K datos"),
+       #col = c("black", "grey", "red"), lty = c(1, 1, 2), bty = "n")
+
+```
+
+Observamos en el gráfico correspondiente a la envelope de $CSR$ que la función de Ripley observada con los datos está por fuera del intervalo de confianza y por encima de la $K$ simulada, esto implica que el proceso de Poisson homogéneo no explica la dependencia espacial que hay en los dato.
+
+Un razonamiento análogo se puede hacer con la envelope del modelo de $Poisson$ inhomogéneo, en este caso la $K_{obs}$ está más cerca de la envolvente, esto podría deberse a que el modelo no asume una intensidad constante pero aún asume independencia entre zonas del espacio.
+
+Por otro lado, al observar la envelope del modelo de $Thomas$ observamos que la $K_{obs}$ está pegada a la envelope, esto se debe a que el modelo tiene en cuenta que hay una clusterización de los datos.
+
+```{r Estimacion de intensidades}
+
+bw <- bw.diggle(delitos_ppp)
+kde_estimation <- density(delitos_ppp, sigma=bw) # estimación de densidad no paramétrica, kernel density estimation (técnica más difundida de estimación de la intensidad)
+
+intensidad_thomas <- predict(modelo_thomas)
+intensidad_poisson <- predict(modelo_espacial)
+
+par(mfrow = c(1, 3))
+
+plot(intensidad_poisson, main = "Modelo de Poisson")
+plot(intensidad_thomas, main = "Modelo de Thomas")
+plot(kde_estimation, main = "Kernel Density Estimation")
+```
+
+Ahora hacemos un análisis similar al anterior pero nos enfocamos en el barrio de Palermo.
+
+```{r Estudio de robos en Palermo}
+
+# Filtrar robos y hurtos de Palermo en 2024
+palermo_2024 <- delitos_2024 %>%
+  filter(tipo %in% c("Robo", "Hurto"),
+         toupper(barrio) == "PALERMO")
+
+# Tendencia temporal
+
+lista_delitos <- list(delitos_2016, delitos_2017, delitos_2018, delitos_2019,
+                      delitos_2020, delitos_2021, delitos_2022, delitos_2023, delitos_2024)
+anios <- 2016:2024
+
+# Contar por año solo Palermo
+serie_palermo <- purrr::map2_df(lista_delitos, anios, ~{
+  data.frame(
+    anio = .y,
+    total = nrow(filter(.x, tipo %in% c("Robo", "Hurto"),
+                        toupper(barrio) == "PALERMO"))
+  )
+})
+
+# Graficar
+ggplot(serie_palermo, aes(x = anio, y = total)) +
+  geom_line(color = "steelblue", size = 1) +
+  geom_point(size = 2, color = "red") +
+  labs(title = "Robos y hurtos en Palermo (2016–2024)",
+       x = "Año", y = "Cantidad de delitos") +
+  theme_minimal()
+```
+
+```{r Autocorrelacion espacial en Palermo}
+
+# Polígono de Palermo
+palermo_poly <- barrios_sf %>%
+  filter(barrio == "PALERMO") %>%
+  st_transform(22185) # proyección métrica
+
+# Delitos en Palermo (ejemplo 2024)
+palermo_2024 <- delitos_2024 %>%
+  filter(tipo %in% c("Robo", "Hurto"),
+         toupper(barrio) == "PALERMO") %>%
+  st_as_sf(coords = c("longitud", "latitud"), crs = 4326) %>%
+  st_transform(22185)
+
+# Crear cuadrícula de 500m x 500m
+grid_palermo <- st_make_grid(palermo_poly, cellsize = 500, square = TRUE) %>%
+  st_intersection(palermo_poly) %>%
+  st_sf()
+
+# Contar delitos por celda
+conteo <- st_join(grid_palermo, palermo_2024) %>%
+  group_by(geometry) %>%
+  summarise(cantidad = n())
+
+# Vecinos y pesos
+vecinos <- poly2nb(conteo)
+pesos <- nb2listw(vecinos, style = "W", zero.policy = TRUE)
+
+# Moran global
+moran_palermo <- moran.test(conteo$cantidad, pesos, zero.policy = TRUE)
+moran_palermo
+```
+
+```{r Modelo de Poisson y proceso de Thomas}
+
+url <- "https://cdn.buenosaires.gob.ar/datosabiertos/datasets/barrios/barrios.geojson"
+barrios_sf <- st_read(url, quiet = TRUE) %>%
+  mutate(barrio = toupper(BARRIO))
+
+# Filtramos delitos de Palermo (por ejemplo para 2024)
+palermo_delitos <- delitos_2024 %>%
+  filter(tipo %in% c("Robo", "Hurto"),
+         toupper(barrio) == "PALERMO") %>%
+  st_as_sf(coords = c("longitud", "latitud"), crs = 4326) %>%
+  st_transform(22185)
+
+# Convertimos a formato spatstat ppp con polígono como ventana
+palermo_ppp <- as.ppp(st_coordinates(palermo_delitos),
+                      W = as.owin(palermo_poly))
+
+# Seleccionamos una muestra aleatoria de 100 puntos
+set.seed(123)
+sub_ppp <- palermo_ppp[sample(1:palermo_ppp$n, 100)]
+
+# Ajustamos modelos
+modelo_thomas <- kppm(sub_ppp ~ 1, clusters = "Thomas", control = list(eps = 100))
+modelo_espacial <- ppm(sub_ppp, ~x + y)
+
+# Envolventes K para comparación
+envelope_thomas <- envelope(modelo_thomas, fun = Kest, nsim = 50, nrank = 5)
+envelope_poisson <- envelope(modelo_espacial, fun = Kest, nsim = 50, nrank = 5)
+envelope_CSR <- envelope(sub_ppp, Kest, nsim = 50, nrank = 5)
+
+# Graficamos envolventes
+par(mfrow = c(1, 3))
+plot(envelope_thomas, main = "Envelope Thomas", xlab = "r", ylab = expression(K(r)), legend = TRUE)
+plot(envelope_CSR, main = "Envelope CSR", xlab = "r", ylab = expression(K(r)), legend = TRUE)
+plot(envelope_poisson, main = "Envelope Poisson Inhomogeneo", xlab = "r", ylab = expression(K(r)), legend = TRUE)
+par(mfrow = c(1, 1))
+
+# Bandwidth óptimo y estimación de densidad
+bw <- bw.diggle(palermo_ppp)
+kde_estimation <- density(palermo_ppp, sigma = bw)
+
+# Predicciones de intensidad de los modelos
+intensidad_thomas <- predict(modelo_thomas)
+intensidad_poisson <- predict(modelo_espacial)
+
+# Graficamos intensidades y KDE
+par(mfrow = c(1, 3))
+plot(intensidad_poisson, main = "Modelo de Poisson")
+plot(intensidad_thomas, main = "Modelo de Thomas")
+plot(kde_estimation, main = "Kernel Density Estimation")
+par(mfrow = c(1, 1))
+
+```
+
+Agregar análisis de estas envelopes
